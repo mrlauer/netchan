@@ -6,10 +6,11 @@
 package mrlnetchan
 
 import (
+	"encoding/gob"
 	"errors"
 	"fmt"
+	"log"
 	"net"
-	"encoding/gob"
 	"reflect"
 	"sync"
 )
@@ -28,8 +29,8 @@ type Addr struct {
 // channels.
 type Listener struct {
 	listener net.Listener
-	channels map[string]channelData
-	mutex	sync.RWMutex
+	channels map[string]*channelData
+	mutex    sync.RWMutex
 }
 
 // A listener may have many named channels, each of which
@@ -37,7 +38,8 @@ type Listener struct {
 type channelData struct {
 	name        string
 	channel     interface{}
-	dataType	reflect.Type
+	dataType    reflect.Type
+	mutex       sync.RWMutex
 	connections []net.Conn // maybe should be a map, with remote addr as key
 }
 
@@ -47,13 +49,13 @@ func (cd *channelData) send(val reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			switch rt := r.(type) {
-			case error :
+			case error:
 				err = rt
 			default:
 				err = fmt.Errorf("%v", r)
 			}
 		}
-	} ()
+	}()
 	reflect.ValueOf(cd.channel).Send(val)
 	return nil
 }
@@ -64,9 +66,11 @@ type connectMsg struct {
 }
 
 type disconnectMsg struct {
+	Addr Addr
 }
 
 type dataMsg struct {
+	Addr Addr
 }
 
 // Listen establishes a Listener on this machine with the specified
@@ -92,12 +96,39 @@ func Listen(tp, addr string) (*Listener, error) {
 	return l, nil
 }
 
-func (l *Listener) addConn(name string, conn net.Conn) (*channelData, error) {
-	return nil, nil
+func (l *Listener) log(err error) {
+	log.Printf("%v\n", err)
 }
 
-func (l *Listener) removeConn(name string) error {
-	return nil
+func (l *Listener) addConn(name string, conn net.Conn) (*channelData, error) {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+	chData := l.channels[name]
+	if chData == nil {
+		return nil, fmt.Errorf("No published channel named %s", name)
+	}
+	chData.mutex.Lock()
+	defer chData.mutex.Unlock()
+	chData.connections = append(chData.connections, conn)
+	return chData, nil
+}
+
+func (l *Listener) removeConn(name string, conn net.Conn) error {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+	chData := l.channels[name]
+	if chData == nil {
+		return fmt.Errorf("No published channel named %s", name)
+	}
+	chData.mutex.Lock()
+	defer chData.mutex.Unlock()
+	for i, c := range chData.connections {
+		if c == conn {
+			chData.connections = append(chData.connections[:i], chData.connections[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("Could not find connection to remove")
 }
 
 func (l *Listener) run(conn net.Conn) {
@@ -113,7 +144,7 @@ func (l *Listener) run(conn net.Conn) {
 	}
 	name := connMsg.Addr.Name
 	chData, err := l.addConn(name, conn)
-	if err != nil || chData == nil {
+	if err != nil {
 		// log the error
 		return
 	}
@@ -126,8 +157,7 @@ func (l *Listener) run(conn net.Conn) {
 		if err != nil {
 			// Should discriminate between gob and io messages. Eh.
 			// Barf.
-			l.removeConn(name)
-			conn.Close()
+			l.removeConn(name, conn)
 			return
 		}
 		switch msg.(type) {
@@ -141,8 +171,7 @@ func (l *Listener) run(conn net.Conn) {
 				chData.send(data.Elem())
 			}
 		case disconnectMsg:
-			l.removeConn(name)
-			conn.Close()
+			l.removeConn(name, conn)
 		}
 	}
 }
