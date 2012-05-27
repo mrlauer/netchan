@@ -9,6 +9,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"reflect"
@@ -28,6 +29,8 @@ type Addr struct {
 // Listener provides the functionality to publish and manage networked
 // channels.
 type Listener struct {
+	net      string // protocol
+	addr     string // address
 	listener net.Listener
 	channels map[string]*channelData
 	mutex    sync.RWMutex
@@ -73,6 +76,11 @@ type dataMsg struct {
 	Addr Addr
 }
 
+type statusMsg struct {
+	Addr  Addr
+	Error error
+}
+
 // Listen establishes a Listener on this machine with the specified
 // network and address.
 func Listen(tp, addr string) (*Listener, error) {
@@ -86,7 +94,9 @@ func Listen(tp, addr string) (*Listener, error) {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				// We're done! Should maybe log the error if it wasn't caused on purpose.
+				if err != io.EOF {
+					l.log(err)
+				}
 				return
 			}
 			// set up and run the connection.
@@ -143,11 +153,22 @@ func (l *Listener) run(conn net.Conn) {
 		return
 	}
 	name := connMsg.Addr.Name
+	encoder := gob.NewEncoder(conn)
 	chData, err := l.addConn(name, conn)
 	if err != nil {
-		// log the error
+		l.log(err)
+		// Send a failure message, then close the connection
+		msg := statusMsg{
+			Addr:  connMsg.Addr,
+			Error: err,
+		}
+		encoder.Encode(msg)
+		conn.Close()
 		return
 	}
+	// Send a simple acknowledgement
+	msg := statusMsg{Addr: connMsg.Addr}
+	encoder.Encode(msg)
 	// A place to put data
 	data := reflect.New(chData.dataType)
 	// Now sit in a for loop awaiting messages
@@ -156,7 +177,7 @@ func (l *Listener) run(conn net.Conn) {
 		err := decoder.Decode(&msg)
 		if err != nil {
 			// Should discriminate between gob and io messages. Eh.
-			// Barf.
+			l.log(err)
 			l.removeConn(name, conn)
 			return
 		}
@@ -165,7 +186,7 @@ func (l *Listener) run(conn net.Conn) {
 			// We read the value.
 			err := decoder.Decode(data)
 			if err != nil {
-				// log the error. Proceed.
+				l.log(err)
 			} else {
 				// Send it along to the channel.
 				chData.send(data.Elem())
@@ -185,14 +206,44 @@ func (l *Listener) run(conn net.Conn) {
 // those messages. Also, after Publish only the receive end of the
 // channel should be used by the caller.
 func (l *Listener) Publish(name string, channel interface{}) (Addr, error) {
-	return Addr{}, errors.New("Not implemented")
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	// see if it's already there
+	if _, ok := l.channels[name]; ok {
+		return Addr{}, fmt.Errorf("%s already published", name)
+	}
+	// Make sure channel really is a channel, and get its type
+	chval := reflect.ValueOf(channel)
+	if chval.Kind() != reflect.Chan || chval.Type().ChanDir() != reflect.BothDir {
+		return Addr{}, fmt.Errorf("Publish needs a bidirectional channel")
+	}
+	tp := chval.Type().Elem()
+	chData := channelData{
+		name:     name,
+		channel:  channel,
+		dataType: tp,
+	}
+	l.channels[name] = &chData
+	return Addr{Net: l.net, Addr: l.addr, Name: name}, nil
 }
 
 // Unpublish removes network address for the channel with the specified
 // address. After Unpublish returns, no further messages can be
 // received on the channel (until it is published again).
 func (l *Listener) Unpublish(addr Addr) error {
-	return errors.New("Not implemented")
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	chData := l.channels[addr.Name]
+	if chData != nil {
+		// close all the open connections
+
+		// Close the channel
+		reflect.ValueOf(chData.channel).Close()
+		// Remove the data
+		delete(l.channels, addr.Name)
+		return nil
+	}
+	return fmt.Errorf("%s is not published", addr.Name)
 }
 
 // Dial connects the channel to the networked channel with the specified
@@ -204,7 +255,15 @@ func (l *Listener) Unpublish(addr Addr) error {
 // the published network channel on the remote machine. Also, after
 // Dial only the send end of the channel should be used by the caller.
 func Dial(addr Addr, channel interface{}) error {
-	return errors.New("Not implemented")
+	conn, err := net.Dial(addr.Net, addr.Addr)
+	if err != nil {
+		return err
+	}
+	encoder := gob.NewEncoder(conn)
+	// Send a start message
+	msg := connectMsg{Addr: addr}
+	encoder.Encode(msg)
+	return nil
 }
 
 // NewName returns a name that is guaranteed with extremely high
