@@ -3,7 +3,7 @@
 //
 // This is a crappy implementation of the interface proposed by Rob Pike.
 // It is not to be taken seriously.
-package mrlnetchan
+package netchan
 
 import (
 	"crypto/rand"
@@ -328,12 +328,12 @@ func Dial(addr Addr, channel interface{}) error {
 			var msg interface{} = dataMsg{addr}
 			err := encoder.Encode(&msg)
 			if err != nil {
-				log.Printf("mrlnetchan: error sending: %v", err)
+				log.Printf("netchan: error sending: %v", err)
 				return
 			}
 			err = encoder.EncodeValue(val)
 			if err != nil {
-				log.Printf("mrlnetchan: error encoding: %v", err)
+				log.Printf("netchan: error encoding: %v", err)
 				return
 			}
 		}

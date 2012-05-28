@@ -1,4 +1,4 @@
-package mrlnetchan
+package netchan
 
 import (
 	"testing"
