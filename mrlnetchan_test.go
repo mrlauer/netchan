@@ -31,7 +31,6 @@ func TestNetchan(t *testing.T) {
 		for _, s := range data {
 			endpt <- s
 		}
-		endpt <- "done!"
 	}()
 
 	for _, s := range data {
@@ -46,5 +45,4 @@ func TestNetchan(t *testing.T) {
 	if ok {
 		t.Errorf("Channel not properly closed")
 	}
-
 }

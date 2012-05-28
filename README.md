@@ -8,4 +8,6 @@ TODO
 
 1) Make it work...
 
-2) Reuse connections.
+2) Sort out what happens when things fail, when connections are closed, when unpublishing.
+
+3) Reuse connections.

@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"runtime"
 	"sync"
 )
 
@@ -29,20 +30,20 @@ type Addr struct {
 // Listener provides the functionality to publish and manage networked
 // channels.
 type Listener struct {
-	net		 string // protocol
-	addr	 string // address
+	net      string // protocol
+	addr     string // address
 	listener net.Listener
 	channels map[string]*channelData
-	mutex	 sync.RWMutex
+	mutex    sync.RWMutex
 }
 
 // A listener may have many named channels, each of which
 // may have many connections
 type channelData struct {
-	name		string
-	channel		interface{}
-	dataType	reflect.Type
-	mutex		sync.RWMutex
+	name        string
+	channel     interface{}
+	dataType    reflect.Type
+	mutex       sync.RWMutex
 	connections []net.Conn // maybe should be a map, with remote addr as key
 }
 
@@ -98,8 +99,8 @@ func Listen(tp, addr string) (*Listener, error) {
 		return nil, err
 	}
 	l := &Listener{
-		net: tp,
-		addr: addr,
+		net:      tp,
+		addr:     addr,
 		listener: ln,
 		channels: make(map[string]*channelData),
 	}
@@ -121,7 +122,8 @@ func Listen(tp, addr string) (*Listener, error) {
 }
 
 func (l *Listener) log(err error) {
-	log.Printf("%v\n", err)
+	_, file, line, _ := runtime.Caller(1)
+	log.Printf("At %s, %d: (%T) %v\n", file, line, err, err)
 }
 
 func (l *Listener) addConn(name string, conn net.Conn) (*channelData, error) {
@@ -186,13 +188,16 @@ func (l *Listener) run(conn net.Conn) {
 	// A place to put data
 	data := reflect.New(chData.dataType)
 	// Now sit in a for loop awaiting messages
+	defer l.removeConn(name, conn)
 	for {
 		var msg interface{}
 		err := decoder.Decode(&msg)
 		if err != nil {
 			// Should discriminate between gob and io messages. Eh.
+			// Ugliness: if the connection closes because of unpublish, then
+			// we'll get an error here. It would be nicer if we had a more elegant way
+			// to break out of the loop.
 			l.log(err)
-			l.removeConn(name, conn)
 			return
 		}
 		switch msg.(type) {
@@ -206,7 +211,7 @@ func (l *Listener) run(conn net.Conn) {
 				chData.send(data.Elem())
 			}
 		case disconnectMsg:
-			l.removeConn(name, conn)
+			return
 		}
 	}
 }
@@ -229,11 +234,11 @@ func (l *Listener) Publish(name string, channel interface{}) (Addr, error) {
 	// Make sure channel really is a channel, and get its type
 	chval := reflect.ValueOf(channel)
 	if err := isUsableChannel(channel); err != nil {
-		return Addr{}, fmt.Errorf("Publish needs a bidirectional channel")
+		return Addr{}, err
 	}
 	tp := chval.Type().Elem()
 	chData := channelData{
-		name:	  name,
+		name:     name,
 		channel:  channel,
 		dataType: tp,
 	}
@@ -258,6 +263,11 @@ func (l *Listener) Unpublish(addr Addr) error {
 	chData := l.channels[addr.Name]
 	if chData != nil {
 		// close all the open connections
+		chData.mutex.Lock()
+		for _, conn := range chData.connections {
+			conn.Close()
+		}
+		chData.mutex.Unlock()
 
 		// Close the channel
 		reflect.ValueOf(chData.channel).Close()
@@ -316,10 +326,12 @@ func Dial(addr Addr, channel interface{}) error {
 			var msg interface{} = dataMsg{addr}
 			err := encoder.Encode(&msg)
 			if err != nil {
+				log.Printf("mrlnetchan: error sending: %v", err)
 				return
 			}
 			err = encoder.EncodeValue(val)
 			if err != nil {
+				log.Printf("mrlnetchan: error encoding: %v", err)
 				return
 			}
 		}
