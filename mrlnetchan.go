@@ -29,20 +29,20 @@ type Addr struct {
 // Listener provides the functionality to publish and manage networked
 // channels.
 type Listener struct {
-	net      string // protocol
-	addr     string // address
+	net		 string // protocol
+	addr	 string // address
 	listener net.Listener
 	channels map[string]*channelData
-	mutex    sync.RWMutex
+	mutex	 sync.RWMutex
 }
 
 // A listener may have many named channels, each of which
 // may have many connections
 type channelData struct {
-	name        string
-	channel     interface{}
-	dataType    reflect.Type
-	mutex       sync.RWMutex
+	name		string
+	channel		interface{}
+	dataType	reflect.Type
+	mutex		sync.RWMutex
 	connections []net.Conn // maybe should be a map, with remote addr as key
 }
 
@@ -81,6 +81,15 @@ type statusMsg struct {
 	Error error
 }
 
+func (msg statusMsg) Ok() bool {
+	return msg.Error == nil
+}
+
+func init() {
+	gob.Register(dataMsg{})
+	gob.Register(disconnectMsg{})
+}
+
 // Listen establishes a Listener on this machine with the specified
 // network and address.
 func Listen(tp, addr string) (*Listener, error) {
@@ -88,7 +97,12 @@ func Listen(tp, addr string) (*Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Listener{listener: ln}
+	l := &Listener{
+		net: tp,
+		addr: addr,
+		listener: ln,
+		channels: make(map[string]*channelData),
+	}
 	// Start a goroutine listening for connections
 	go func() {
 		for {
@@ -184,7 +198,7 @@ func (l *Listener) run(conn net.Conn) {
 		switch msg.(type) {
 		case dataMsg:
 			// We read the value.
-			err := decoder.Decode(data)
+			err := decoder.DecodeValue(data)
 			if err != nil {
 				l.log(err)
 			} else {
@@ -214,17 +228,25 @@ func (l *Listener) Publish(name string, channel interface{}) (Addr, error) {
 	}
 	// Make sure channel really is a channel, and get its type
 	chval := reflect.ValueOf(channel)
-	if chval.Kind() != reflect.Chan || chval.Type().ChanDir() != reflect.BothDir {
+	if err := isUsableChannel(channel); err != nil {
 		return Addr{}, fmt.Errorf("Publish needs a bidirectional channel")
 	}
 	tp := chval.Type().Elem()
 	chData := channelData{
-		name:     name,
+		name:	  name,
 		channel:  channel,
 		dataType: tp,
 	}
 	l.channels[name] = &chData
 	return Addr{Net: l.net, Addr: l.addr, Name: name}, nil
+}
+
+func isUsableChannel(ch interface{}) error {
+	chval := reflect.ValueOf(ch)
+	if chval.Kind() != reflect.Chan || chval.Type().ChanDir() != reflect.BothDir {
+		return fmt.Errorf("Publish needs a bidirectional channel")
+	}
+	return nil
 }
 
 // Unpublish removes network address for the channel with the specified
@@ -255,14 +277,54 @@ func (l *Listener) Unpublish(addr Addr) error {
 // the published network channel on the remote machine. Also, after
 // Dial only the send end of the channel should be used by the caller.
 func Dial(addr Addr, channel interface{}) error {
+	if err := isUsableChannel(channel); err != nil {
+		return err
+	}
 	conn, err := net.Dial(addr.Net, addr.Addr)
 	if err != nil {
 		return err
 	}
 	encoder := gob.NewEncoder(conn)
+	decoder := gob.NewDecoder(conn)
 	// Send a start message
 	msg := connectMsg{Addr: addr}
-	encoder.Encode(msg)
+	err = encoder.Encode(msg)
+	if err != nil {
+		return err
+	}
+	// Wait for the acknowledgement
+	var ack statusMsg
+	err = decoder.Decode(&ack)
+	if err != nil {
+		return err
+	}
+	if !ack.Ok() {
+		return ack.Error
+	}
+	// Start a goroutine listening to the channel
+	go func() {
+		chval := reflect.ValueOf(channel)
+		for {
+			val, ok := chval.Recv()
+			if !ok {
+				// Channel was closed. We're done.
+				var msg interface{} = disconnectMsg{addr}
+				encoder.Encode(&msg)
+				return
+			}
+			// Send the value
+			var msg interface{} = dataMsg{addr}
+			err := encoder.Encode(&msg)
+			if err != nil {
+				return
+			}
+			err = encoder.EncodeValue(val)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	return nil
 }
 
@@ -277,51 +339,51 @@ func NewName() string {
 // Simple example; for brevity errors are listed but not examined.
 
 type msg1 struct {
-        Addr Addr
-        Who string
+		Addr Addr
+		Who string
 }
 type msg2 struct {
-        Greeting string
-        Who string
+		Greeting string
+		Who string
 }
 
 func server() {
-        // Announce a greeting service.
-        l, err := netchan.Listen(":12345")
-        c1 := make(chan msg1)
-        addr, err := l.Publish(c1, "GreetingService")
-        for {
-                // Receive a message from someone who wants to be greeted.
-                m1 := <-c1
-                // Create a new channel and connect it to the client.
-                c2 := make(chan msg2)
-                err = netchan.Dial(m1.Addr, c2)
-                // Send the greeting.
-                c2 <- msg2{"Hello", m1.Who}
-                // Close the channel.
-                close(c2)
-        }
+		// Announce a greeting service.
+		l, err := netchan.Listen(":12345")
+		c1 := make(chan msg1)
+		addr, err := l.Publish(c1, "GreetingService")
+		for {
+				// Receive a message from someone who wants to be greeted.
+				m1 := <-c1
+				// Create a new channel and connect it to the client.
+				c2 := make(chan msg2)
+				err = netchan.Dial(m1.Addr, c2)
+				// Send the greeting.
+				c2 <- msg2{"Hello", m1.Who}
+				// Close the channel.
+				close(c2)
+		}
 }
 
 func client() {
-        // Announce a service so we can be contacted by the greeting service.
-        l, err := netchan.Listen(":23456")
-        // The name of the greeting service must be known separately.
-        greet := netchan.Addr{"tcp", "server.com:12345", "GreetingService"}
-        c1 := make(chan msg1)
-        c2 := make(chan msg2)
-        // Connect to the greeting service and ask for a message.
-        err = netchan.Dial(greet, c1)
-        // Publish a place to receive the greeting before we ask for it.
-        addr, err := netchan.Publish(c2, netchan.NewName())
-        c1 <- msg1{addr, "Eduardo"}
-        // Receive the message and tear down.
-        reply := <-c2
-        fmt.Println(reply.Greeting, ", ", reply.Who) // "Hello, Eduardo"
-        // Tell the library we're done with this channel.
-        netchan.Unpublish(c2)
-        // No more data will be sent on c2.
-        close(c2)
+		// Announce a service so we can be contacted by the greeting service.
+		l, err := netchan.Listen(":23456")
+		// The name of the greeting service must be known separately.
+		greet := netchan.Addr{"tcp", "server.com:12345", "GreetingService"}
+		c1 := make(chan msg1)
+		c2 := make(chan msg2)
+		// Connect to the greeting service and ask for a message.
+		err = netchan.Dial(greet, c1)
+		// Publish a place to receive the greeting before we ask for it.
+		addr, err := netchan.Publish(c2, netchan.NewName())
+		c1 <- msg1{addr, "Eduardo"}
+		// Receive the message and tear down.
+		reply := <-c2
+		fmt.Println(reply.Greeting, ", ", reply.Who) // "Hello, Eduardo"
+		// Tell the library we're done with this channel.
+		netchan.Unpublish(c2)
+		// No more data will be sent on c2.
+		close(c2)
 }
 
 */
