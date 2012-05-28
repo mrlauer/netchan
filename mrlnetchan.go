@@ -6,7 +6,9 @@
 package mrlnetchan
 
 import (
+	"crypto/rand"
 	"encoding/gob"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -343,7 +345,10 @@ func Dial(addr Addr, channel interface{}) error {
 // NewName returns a name that is guaranteed with extremely high
 // probability to be globally unique.
 func NewName() string {
-	return ""
+	const sz = 16
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 /*

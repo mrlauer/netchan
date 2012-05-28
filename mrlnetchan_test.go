@@ -46,3 +46,14 @@ func TestNetchan(t *testing.T) {
 		t.Errorf("Channel not properly closed")
 	}
 }
+
+func TestNewName(t *testing.T) {
+	N := 100
+	m := make(map[string]bool)
+	for i := 0; i<N; i++ {
+		s := NewName()
+		if b, ok := m[s]; b || ok {
+			t.Errorf("NewName returned %s twice", s)
+		}
+	}
+}
