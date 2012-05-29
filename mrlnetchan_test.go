@@ -20,6 +20,7 @@ func TestNetchan(t *testing.T) {
 	if err != nil {
 		t.Errorf("error dialing: %v", err)
 	}
+	errs := Errors(addr)
 
 	data := []string{
 		"Foo!",
@@ -44,6 +45,13 @@ func TestNetchan(t *testing.T) {
 	_, ok := <-ch
 	if ok {
 		t.Errorf("Channel not properly closed")
+	}
+
+	for {
+		_, ok := <-errs
+		if !ok {
+			break
+		}
 	}
 }
 

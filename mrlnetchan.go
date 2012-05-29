@@ -313,9 +313,22 @@ func Dial(addr Addr, channel interface{}) error {
 	if !ack.Ok() {
 		return ack.Error
 	}
+	errs := getErrorChannel(addr)
 	// Start a goroutine listening to the channel
 	go func() {
+		defer releaseErrorChannel(addr)
 		chval := reflect.ValueOf(channel)
+
+		// Start a goroutine listening for stuff.
+		// Right now just shut things down at eof
+		// by closing the error channel. That is probably not right.
+		go func() {
+			buffer := make([]byte, 128)
+			_, err := conn.Read(buffer)
+			errs <- err
+			close(errs)
+		}()
+
 		for {
 			val, ok := chval.Recv()
 			if !ok {
@@ -328,17 +341,70 @@ func Dial(addr Addr, channel interface{}) error {
 			var msg interface{} = dataMsg{addr}
 			err := encoder.Encode(&msg)
 			if err != nil {
-				log.Printf("netchan: error sending: %v", err)
+				errs <- err
 				return
 			}
 			err = encoder.EncodeValue(val)
 			if err != nil {
-				log.Printf("netchan: error encoding: %v", err)
+				errs <- err
 				return
 			}
 		}
 	}()
 
+	return nil
+}
+
+// Errors channels. They are buffered
+type errChanData struct {
+	Chan  chan error
+	Count int
+}
+
+var errChans map[Addr]*errChanData
+var errChanMutex sync.RWMutex
+
+func init() {
+	errChans = make(map[Addr]*errChanData)
+}
+
+func getErrorChannel(addr Addr) chan error {
+	errChanMutex.Lock()
+	defer errChanMutex.Unlock()
+	chdat := errChans[addr]
+	if chdat == nil {
+		ch := make(chan error, 10)
+		chdat = &errChanData{Chan: ch}
+		errChans[addr] = chdat
+	}
+	chdat.Count++
+	return chdat.Chan
+}
+
+func releaseErrorChannel(addr Addr) {
+	errChanMutex.Lock()
+	defer errChanMutex.Unlock()
+	chdat := errChans[addr]
+	if chdat != nil {
+		chdat.Count--
+		if chdat.Count <= 0 {
+			close(chdat.Chan)
+			delete(errChans, addr)
+		}
+	}
+}
+
+// Errors returns a channel for errors in the connection.
+// If the connection is dropped because of anything other than closing
+// the channel on the client side, then some appropriate error will be
+// returned here. The channel will always be closed when a connection ends.
+func Errors(addr Addr) chan error {
+	errChanMutex.RLock()
+	defer errChanMutex.RUnlock()
+	chdata := errChans[addr]
+	if chdata != nil {
+		return chdata.Chan
+	}
 	return nil
 }
 
